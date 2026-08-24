@@ -64,9 +64,9 @@ Alternatively, use `compileAsync` for asynchronous compilation.
 
 ## Security
 
-Although this package does [avoid the use of `eval()`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/eval#Do_not_ever_use_eval!), it _cannot guarantee that user-provided expressions, or user-provided inputs to evaluation, will not modify the state or behavior of your application_. Always use caution when combining user input and dynamic evaluation, and avoid it where possible.
+**This fork differs from upstream here, and that is the reason it exists.**
 
-For example:
+Upstream documents that it _cannot guarantee that user-provided expressions, or user-provided inputs to evaluation, will not modify the state or behavior of your application_, and gives this example:
 
 ```js
 const ast = expr.parse('foo[bar](baz)()');
@@ -75,10 +75,38 @@ expr.eval(ast, {
   bar: 'constructor',
   baz: 'console.log("im in ur logs");'
 });
-// Prints: "im in ur logs"
+// upstream prints: "im in ur logs"
+// this fork throws: UnsafeExpressionError
 ```
 
-The kinds of expressions that can expose vulnerabilities can be more subtle than this, and are sometimes possible even in cases where users only provide primitive values as inputs to pre-defined expressions.
+That advice — do not evaluate untrusted expressions — is sound for a general-purpose library and unusable for the application this fork serves, which stores expressions written by one user and renders them for another. The capability is therefore removed rather than documented around.
+
+### What is refused
+
+Both are refused at **evaluation**, throwing `UnsafeExpressionError`:
+
+- **`CallExpression`** — nothing may be invoked. This alone closes the hole: a constructor reached without a call is an inert object.
+- **computed `MemberExpression`** (`a[b]`) — a property name computed at runtime is how `"constructor"` is reached without writing it as an identifier.
+
+Static member access (`a.b`) is untouched, being neither of those.
+
+```js
+expr.compile('1 + foo')({foo: 2});        // 3
+expr.compile('a[b]')({a: {}, b: 'x'});    // throws UnsafeExpressionError
+expr.compile('f()')({f: () => 1});        // throws UnsafeExpressionError
+```
+
+### Why evaluation and not parsing
+
+Short-circuiting stays honest: `true || f()` still returns `true` without touching `f()`, exactly as before. A node that is never evaluated never ran, so this is sufficient. A caller wanting the stronger guarantee that such an expression cannot even *compile* should walk the AST from `parse()` first — refusing eagerly inside the library would change the language's semantics rather than only its capabilities.
+
+### Still your problem
+
+Narrowing the grammar does not make arbitrary input safe. Expressions can still be slow, can still read anything you put in the context object, and can still return values your application then trusts. Do not put anything in the evaluation context that the expression's author should not have.
+
+### Relationship to `.` in this fork
+
+This package depends on a [forked jsep](https://github.com/gkujawsk/jsep) in which `.` is an identifier character, so `foo.bar` parses as a single `Identifier` named `"foo.bar"` and resolves against the context by that whole name. Member access via `.` is therefore largely unreachable here regardless of the above.
 
 ## License
 

@@ -5,6 +5,53 @@ const jsep = require('jsep/src/jsep.js');
  * Copyright (c) 2013 Stephen Oney, http://jsep.from.so/
  */
 
+/**
+ * Thrown for a construct this fork refuses to evaluate.
+ *
+ * ## Why this fork refuses anything
+ *
+ * Upstream `expression-eval` evaluates call syntax and computed member access, and
+ * that combination is an arbitrary-code-execution primitive whenever the expression
+ * itself is untrusted input:
+ *
+ *     x["constructor"]["constructor"]("return 40+2")()   //=> 42
+ *
+ * `x` need not be anything special — every object leads to `Function` through its
+ * constructor. Any application that stores user-authored expressions and evaluates
+ * them later is therefore one stored string away from running attacker code.
+ *
+ * Upstream's position is that the caller should not feed it untrusted input. That is
+ * a reasonable stance for a general-purpose library and a poor one for this fork,
+ * whose only consumer evaluates expressions typed by one user and rendered for
+ * another. So the capability is removed rather than documented around.
+ *
+ * ## What is refused
+ *
+ *   - `CallExpression` — nothing may be invoked. This alone closes the hole: a
+ *     constructor reached without a call is an inert object.
+ *   - computed `MemberExpression` (`a[b]`) — a property name computed at runtime is
+ *     how an attacker reaches `"constructor"` without writing it as an identifier.
+ *
+ * Static member access (`a.b`) is untouched, being neither of those. Note it is also
+ * largely unreachable here: the forked jsep this package depends on treats `.` as an
+ * identifier character, so `foo.bar` parses as one Identifier named `"foo.bar"`.
+ *
+ * ## When it is refused
+ *
+ * At evaluation, not at parse. That keeps short-circuiting honest — `true || f()`
+ * still returns `true` without touching `f()`, as it always did — and it is
+ * sufficient, because a refused node that is never evaluated never ran. A caller
+ * wanting the stricter guarantee that such an expression cannot even compile should
+ * walk the AST from `parse()` before evaluating; refusing eagerly here would change
+ * the language's semantics rather than just its capabilities.
+ */
+class UnsafeExpressionError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'UnsafeExpressionError';
+  }
+}
+
 const binops = {
   '||':  function (a, b) { return a || b; },
   '&&':  function (a, b) { return a && b; },
@@ -46,21 +93,19 @@ async function evaluateArrayAsync( list, context ) {
 }
 
 function evaluateMember ( node, context ) {
-  const object = evaluate(node.object, context);
   if ( node.computed ) {
-    return [object, object[evaluate(node.property, context)]];
-  } else {
-    return [object, object[node.property.name]];
+    throw new UnsafeExpressionError('Computed member access (a[b]) is not supported.');
   }
+  const object = evaluate(node.object, context);
+  return [object, object[node.property.name]];
 }
 
 async function evaluateMemberAsync( node, context ) {
-  const object = await evaluateAsync(node.object, context);
-  if (  node.computed) {
-    return [object, object[await evaluateAsync(node.property, context)]];
-  } else {
-    return [object, object[node.property.name]];
+  if ( node.computed ) {
+    throw new UnsafeExpressionError('Computed member access (a[b]) is not supported.');
   }
+  const object = await evaluateAsync(node.object, context);
+  return [object, object[node.property.name]];
 }
 
 function evaluate ( node, context ) {
@@ -74,16 +119,7 @@ function evaluate ( node, context ) {
       return binops[ node.operator ]( evaluate( node.left, context ), evaluate( node.right, context ) );
 
     case 'CallExpression':
-      let caller, fn, assign;
-      if (node.callee.type === 'MemberExpression') {
-        assign = evaluateMember( node.callee, context );
-        caller = assign[0];
-        fn = assign[1];
-      } else {
-        fn = evaluate( node.callee, context );
-      }
-      if (typeof fn  !== 'function') { return undefined; }
-      return fn.apply( caller, evaluateArray( node.arguments, context ) );
+      throw new UnsafeExpressionError('Function calls are not supported.');
 
     case 'ConditionalExpression':
       return evaluate( node.test, context )
@@ -135,21 +171,7 @@ async function evaluateAsync( node, context ) {
     }
 
     case 'CallExpression':
-      let caller, fn, assign;
-      if (node.callee.type === 'MemberExpression') {
-        assign = await evaluateMemberAsync( node.callee, context );
-        caller = assign[0];
-        fn = assign[1];
-      } else {
-        fn = await evaluateAsync( node.callee, context );
-      }
-      if (typeof fn !== 'function') {
-        return undefined;
-      }
-      return await fn.apply(
-        caller,
-        await evaluateArrayAsync( node.arguments, context )
-      );
+      throw new UnsafeExpressionError('Function calls are not supported.');
 
     case 'ConditionalExpression':
       return (await evaluateAsync( node.test, context ))
@@ -210,5 +232,8 @@ module.exports = {
   eval: evaluate,
   evalAsync: evaluateAsync,
   compile: compile,
-  compileAsync: compileAsync
+  compileAsync: compileAsync,
+  // Exported so a caller can tell "you may not do that" apart from "that is not
+  // valid syntax" — the two want different messages in front of a user.
+  UnsafeExpressionError: UnsafeExpressionError
 };

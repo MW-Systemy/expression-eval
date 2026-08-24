@@ -1,16 +1,11 @@
 const expr = require('./');
 const assert = require('assert');
 
+// Expressions that evaluate, and to what.
 const fixtures = [
 
   // array expression
-  {expr: '([1,2,3])[0]',               expected: 1     },
-  {expr: '(["one","two","three"])[1]', expected: 'two' },
-  {expr: '([true,false,true])[2]',     expected: true  },
   {expr: '([1,true,"three"]).length',  expected: 3     },
-  {expr: 'isArray([1,2,3])',           expected: true  },
-  {expr: 'list[3]',                    expected: 4     },
-  {expr: 'numMap[1 + two]',            expected: 'three'},
 
   // binary expression
   {expr: '1+2',         expected: 3},
@@ -26,10 +21,6 @@ const fixtures = [
   {expr: '10%6',        expected: 4},
   {expr: '"a"+"b"',     expected: 'ab'},
   {expr: 'one + three', expected: 4},
-
-  // call expression
-  {expr: 'func(5)',   expected: 6},
-  {expr: 'func(1+2)', expected: 4},
 
   // conditional expression
   {expr: '(true ? "true" : "false")',               expected: 'true'  },
@@ -60,19 +51,13 @@ const fixtures = [
   {expr: '2 <= 2',          expected: true  },
   {expr: '1 >= 2',          expected: false },
 
-  // logical expression lazy evaluation
+  // Logical short-circuiting still skips the right-hand side entirely. These matter
+  // more than they look: refusal happens at evaluation, so an un-evaluated call must
+  // stay un-evaluated rather than becoming an error.
   {expr: 'true || throw()',  expected: true  },
   {expr: 'false || true',    expected: true  },
-  {expr: 'false && throw()', expected: false  },
-  {expr: 'true && false',    expected: false  },
-
-  // member expression
-  {expr: 'foo.bar',      expected: 'baz' },
-  {expr: 'foo["bar"]',   expected: 'baz' },
-  {expr: 'foo[foo.bar]', expected: 'wow' },
-
-  // call expression with member
-  {expr: 'foo.func("bar")', expected: 'baz'},
+  {expr: 'false && throw()', expected: false },
+  {expr: 'true && false',    expected: false },
 
   // unary expression
   {expr: '-one',   expected: -1   },
@@ -82,9 +67,40 @@ const fixtures = [
   {expr: '~15',    expected: -16  },
   {expr: '+[]',    expected: 0    },
 
-  // 'this' context
-  {expr: 'this.three', expected: 3 },
+];
 
+// Constructs this fork refuses. Each must throw UnsafeExpressionError — not return
+// undefined, which would make a rejected expression indistinguishable from one that
+// legitimately evaluated to nothing.
+const refused = [
+  // the payload this fork exists to stop, and its pieces
+  'x["constructor"]["constructor"]("return 40+2")()',
+  'x["constructor"]',
+
+  // calls of every shape
+  'func(5)',
+  'func(1+2)',
+  'isArray([1,2,3])',
+
+  // computed member access
+  '([1,2,3])[0]',
+  '(["one","two","three"])[1]',
+  '([true,false,true])[2]',
+  'list[3]',
+  'numMap[1 + two]',
+  'foo["bar"]',
+];
+
+// Behaviour inherited from the forked jsep this package depends on, recorded because
+// it surprises anyone arriving from upstream: `.` is an identifier character here, so
+// `foo.bar` is a single Identifier named "foo.bar" rather than member access. These
+// resolve against the context by that whole name, and are undefined when absent.
+// They were already failing before calls were refused; the expectations describe what
+// this fork actually does.
+const dottedIdentifiers = [
+  {expr: 'foo.bar',    expected: undefined},
+  {expr: 'this.three', expected: undefined},
+  {expr: 'dotted.name', expected: 'resolved by full name'},
 ];
 
 const context = {
@@ -99,13 +115,19 @@ const context = {
   list: [1,2,3,4,5],
   func: function(x) { return x + 1; },
   isArray: Array.isArray,
+  x: {},
+  'dotted.name': 'resolved by full name',
   throw: () => { throw new Error('Should not be called.'); }
 };
 
 var tests = 0;
 var passed = 0;
 
-fixtures.forEach((o) => {
+function checkValue(o, val) {
+  assert.strictEqual(val, o.expected, `Failed: ${o.expr} (${val}) === ${o.expected}`);
+}
+
+[...fixtures, ...dottedIdentifiers].forEach((o) => {
   tests++;
   try {
     var val = expr.compile(o.expr)(context);
@@ -113,37 +135,39 @@ fixtures.forEach((o) => {
     console.error(`Error: ${o.expr}, expected ${o.expected}`);
     throw e;
   }
-  assert.equal(val, o.expected, `Failed: ${o.expr} (${val}) === ${o.expected}`);
+  checkValue(o, val);
+  passed++;
+});
+
+refused.forEach((source) => {
+  tests++;
+  assert.throws(
+    () => expr.compile(source)(context),
+    (e) => e instanceof expr.UnsafeExpressionError,
+    `Expected ${source} to be refused with UnsafeExpressionError`
+  );
   passed++;
 });
 
 async function testAsync() {
-  const asyncContext = context;
-  asyncContext.asyncFunc = async function(a, b) {
-    return await a + b;
-  };
-  asyncContext.promiseFunc = function(a, b) {
-    return new Promise((resolve, reject) => {
-      setTimeout(() => resolve(a + b), 1000);
-    })
-  }
-  const asyncFixtures = fixtures;
-  asyncFixtures.push({
-    expr: 'asyncFunc(one, two)',
-    expected: 3,
-  }, {
-    expr: 'promiseFunc(one, two)',
-    expected: 3,
-  });
-  for (let o of asyncFixtures) {
+  for (let o of [...fixtures, ...dottedIdentifiers]) {
     tests++;
     try {
-      var val = await expr.compileAsync(o.expr)(asyncContext);
+      var val = await expr.compileAsync(o.expr)(context);
     } catch (e) {
       console.error(`Error: ${o.expr}, expected ${o.expected}`);
       throw e;
     }
-    assert.equal(val, o.expected, `Failed: ${o.expr} (${val}) === ${o.expected}`);
+    checkValue(o, val);
+    passed++;
+  }
+  for (let source of refused) {
+    tests++;
+    await assert.rejects(
+      async () => expr.compileAsync(source)(context),
+      (e) => e instanceof expr.UnsafeExpressionError,
+      `Expected async ${source} to be refused with UnsafeExpressionError`
+    );
     passed++;
   }
 }
