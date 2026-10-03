@@ -106,7 +106,7 @@ Narrowing the grammar does not make arbitrary input safe. Expressions can still 
 
 ### Relationship to `.` in this fork
 
-This package depends on a [forked jsep](https://github.com/gkujawsk/jsep) in which `.` is an identifier character, so `foo.bar` parses as a single `Identifier` named `"foo.bar"` and resolves against the context by that whole name. Member access via `.` is therefore largely unreachable here regardless of the above.
+This package depends on a [forked jsep](https://github.com/MW-Systemy/jsep) in which `.` is an identifier character, so `foo.bar` parses as a single `Identifier` named `"foo.bar"` and resolves against the context by that whole name. Member access via `.` is therefore largely unreachable here regardless of the above.
 
 ## License
 
